@@ -4,19 +4,27 @@ use std::env;
 use clap::builder::TypedValueParser;
 use serde_json::Value;
 
-enum ParseTy
-{
-    Num,
-    Str,
-}
 
 
 // Available if you need it!
 // use serde_bencode
-fn decode(encoded_value: &str) -> (Value, &str)
+
+fn decode(encoded_value:&str)->(Value, &str)
 {
-    // i53e
-    match &encoded_value.chars().next() {
+    match encoded_value.chars().next() {
+        Some('l') => {
+            let mut result = &encoded_value[1..];
+            let mut vec = Vec::new();
+            loop {
+                let (value, rest) = decode(result);
+                vec.push(value);
+                if rest.is_empty() || rest.chars().next().unwrap() == 'e'
+                {
+                    return (vec.into(),result);
+                }
+                result = rest;
+            }
+        }
         Some('i') =>
             {
                 let mut rest_str = "";
@@ -48,34 +56,15 @@ fn decode(encoded_value: &str) -> (Value, &str)
         _ => {}
     }
     panic!("Unhandled encoded value: {}", encoded_value)
+
 }
 
 #[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str) -> Value {
     // If encoded_value starts with a digit, it's a number
 
-    match encoded_value.chars().next() {
-        Some('l') => {
-            let mut result = &encoded_value[1..];
-            let mut vec = Vec::new();
-            loop {
-                let (value, rest) = decode(result);
-                vec.push(value);
-                if rest.is_empty() || rest.chars().next().unwrap() == 'e'
-                {
-                    return vec.into();
-                }
-                result = rest;
-            }
-        }
-        Some(_) => {
-            let (value, _) = decode(encoded_value);
-            return value;
-        }
-        _ => {
-            panic!("Unhandled encoded value: {}", encoded_value)
-        }
-    }
+   let (value,_) = decode(encoded_value);
+    value
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
