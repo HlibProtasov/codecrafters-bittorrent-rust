@@ -1,6 +1,6 @@
 use serde_json;
 use std::env;
-use std::str::Chars;
+
 
 // Available if you need it!
 // use serde_bencode
@@ -8,16 +8,13 @@ use std::str::Chars;
 #[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
     // If encoded_value starts with a digit, it's a number
-    if encoded_value.is_empty()
-    {
-        panic!("Unhandled encoded value: {}", encoded_value)
-    }
-    match &encoded_value.chars().next().unwrap() {
-        'i' => {
-            let number = encoded_value[1..encoded_value.len() - 1].parse::<i64>().unwrap();
-            return serde_json::Value::Number(number.into());
-        }
-        '0'..='9' =>
+    match &encoded_value.chars().next() {
+        Some('i') =>
+            {
+                let number = encoded_value[1..encoded_value.len() - 1].parse::<i64>().unwrap();
+                return serde_json::Value::Number(number.into());
+            }
+        Some('0'..='9') =>
             {
                 if let Some((len, other)) = encoded_value.split_once(':')
                 {
