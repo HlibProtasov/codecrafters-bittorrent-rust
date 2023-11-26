@@ -1,5 +1,5 @@
 pub mod tracker;
-
+pub mod peer;
 pub mod cli
 {
     use std::path::PathBuf;
@@ -31,6 +31,11 @@ pub mod cli
         {
             torrent: PathBuf
         },
+        Handshake
+        {
+            torrent: PathBuf,
+            peer: String
+        }
     }
 }
 

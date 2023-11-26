@@ -1,9 +1,10 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+use crate::tracker::peers::Peers;
 
+/// FIELD INFO_HASH is not included
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackerRequest
 {
-    pub info_hash: [u8; 20],
     pub peer_id: String,
     pub port: u16,
     // 6881
@@ -18,11 +19,10 @@ pub struct TrackerRequest
 
 impl TrackerRequest
 {
-    pub fn new(info_hash: [u8; 20], peer_id: String, left: usize) -> Self
+    pub fn new(peer_id: String, left: usize) -> Self
     {
         Self
         {
-            info_hash,
             peer_id,
             port: 6881,
             uploaded: 0,
@@ -32,13 +32,23 @@ impl TrackerRequest
         }
     }
 }
+pub fn url_encode(t: &[u8; 20]) -> String
+{
+    let mut vec = String::with_capacity(3 * t.len());
+    for bytes in t
+    {
+        vec.push('%');
+        vec.push_str(&hex::encode(&[*bytes]))
+    }
+    vec
+}
 
 #[derive(Debug, Clone, Deserialize)]
-struct TrackerResponse
+pub struct TrackerResponse
 {
     // in seconds
-    interval: usize,
-    peers: String,
+    pub interval: usize,
+    pub peers: Peers,
 
 }
 
