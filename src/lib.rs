@@ -8,7 +8,6 @@ pub mod cli
         Parser,
         Subcommand,
     };
-    use crate::peer::MessageFramer;
 
 
     #[derive(Parser, Debug, Clone)]
@@ -38,22 +37,23 @@ pub mod cli
             torrent: PathBuf,
             peer: String,
         },
+        #[clap(name = "download_piece")]
         DownloadPiece
         {
             output: PathBuf,
             torrent: PathBuf,
-            piece: usize
-        }
+            piece: usize,
+        },
     }
 }
 
-pub mod TorrentExecutor
+pub mod torrent_executor
 {
     use std::net::SocketAddrV4;
     use std::str::FromStr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use crate::cli::Commands;
-    use crate::peer::{Handshake, MessageFramer};
+    use crate::peer::{Handshake, Message, MessageFramer, MessageTag, PeerRequest, PieceMessage};
     use crate::{Keys, Torrent};
     use crate::tracker::{TrackerResponse, url_encode};
     use crate::tracker::TrackerRequest;
@@ -61,6 +61,9 @@ pub mod TorrentExecutor
     use tokio::net::TcpStream;
     use crate::decoder::decode_bencoded_value;
     use futures_util::stream::StreamExt;
+    use futures_util::SinkExt;
+    use sha1::{Sha1,Digest};
+    use crate::peer::MessageTag::{ Request};
 
     pub struct TorrentExecutor;
 
@@ -111,19 +114,76 @@ pub mod TorrentExecutor
                         let hash = t.info_hash()?;
                         let socket = SocketAddrV4::from_str(&peer).context("Deriving socket")?;
                         TorrentExecutor::handshake(hash, socket).await.context("Making handshake")?;
-                    },
+                    }
                 Commands::DownloadPiece { torrent, output, piece } =>
                     {
                         let torrent = Torrent::try_from(&torrent).context("Deriving torrent")?;
                         let tracker_response = Self::get_peers(&torrent).await?;
 
                         let peer = tracker_response.peers.0[0]; // Can connect to all peers or to randome one
-                        let peer = Self::handshake(torrent.info_hash()?,peer).await?;
+                        let peer = Self::handshake(torrent.info_hash()?, peer).await?;
                         let mut framed = tokio_util::codec::Framed::new(peer, MessageFramer);
-                        let msg = framed.next().await.context("Waiting for message")?
+                        let msg = framed.next().await.expect("Peer always sends first message")
+                            .context("Deriving message")?;
+                        assert_eq!(msg.tag, MessageTag::Bitfield, "First message should has bitfield tag");
+                        framed.send(
+                            Message
+                            {
+                                tag: MessageTag::Interested,
+                                payload: vec![],
+                            }
+                        ).await.context("Sending 'interesting' message")?;
+                        let msg = framed.next().await.expect("Peer always sends first message")
                             .context("Deriving message")?;
 
+                        assert_eq!(msg.tag, MessageTag::UnChoke, "Waiting for 'unchoke' message");
+                        assert!(torrent.info.pieces.0.len() > piece, "Can't get peice hash");
 
+                        let peice_hash = torrent.info.pieces.0[piece];
+                        let piece_size = match (piece, torrent.info.keys)
+                        {
+                            (p, Keys::SingleFile { length }) if p == torrent.info.pieces.0.len() + 1 => {
+                                length % torrent.info.length
+                            }
+                            (_, Keys::SingleFile { length: _ }) => torrent.info.length,
+
+                            _ => unimplemented!()
+                        };
+                        let nblocks = (piece_size + 2 ^ 14 - 1) / 2 ^ 14;
+                        let mut pieces: Vec<u8> = Vec::with_capacity(nblocks);
+                        for block in 0..nblocks
+                        {
+                            let block_size = if block == nblocks {
+                                piece_size % 2 ^ 14
+                            } else {
+                                2 ^ 14
+                            };
+                            let request = PeerRequest::new(piece as u32,(block * 2 ^ 14) as u32, block_size as u32);
+                            // TODO! add safe casting
+
+                            framed.send(
+                                Message
+                                {
+                                    tag: Request,
+                                    payload: request.to_bytes().to_vec(),
+                                }
+                            ).await.
+                                with_context(||
+                                    format!("request with index: {}, len: {}, begin: {}",
+                                            request.index(), request.length(), request.begin()
+                                    )
+                                )?;
+                            let msg = framed.next().await.expect("Peer always sends first message")
+                                .context("Deriving piece message")?;
+                            assert_eq!(msg.tag, MessageTag::Piece, "Waiting for the 'Piece message'");
+                            assert!(!msg.payload.is_empty(), "Shuldn't be empty");
+                            let piece = PieceMessage::from_bytes(msg.payload.as_slice());
+                            pieces.extend(piece.block());
+                        }
+                        let mut sha = Sha1::new();
+                        sha.update(pieces);
+                        let hash = sha.finalize();
+                        println!("{:?}", hash);
                     }
                 _ => { unimplemented!() }
             }
@@ -153,9 +213,9 @@ pub mod TorrentExecutor
         }
         async fn handshake(hash_info: [u8; 20], socket: SocketAddrV4) -> anyhow::Result<TcpStream>
         {
-            let handshake = Handshake::new(hash_info);
+            let mut handshake = Handshake::new(hash_info);
             let mut peer = tokio::net::TcpStream::connect(socket).await.context("Creating connection to peer")?;
-            let handshake_bytes = handshake.to_bytes();
+            let handshake_bytes = handshake.to_bytes_mut();
             peer.write_all(&handshake_bytes).await.context("Writing to peer")?;
 
             let mut buffer = Vec::new();
@@ -164,7 +224,6 @@ pub mod TorrentExecutor
             println!("Handshake: {:?}", response_handshake);
             Ok(peer)
         }
-
     }
 }
 

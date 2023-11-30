@@ -1,7 +1,80 @@
+use std::arch::x86_64::_andn_u32;
+use std::slice::from_raw_parts;
 use anyhow::Context;
 use tokio_util::codec::Decoder;
 use tokio_util::codec::Encoder;
 use bytes::{BytesMut, Buf};
+
+
+#[derive(Debug)]
+pub struct PieceMessage
+{
+    index: [u8; 4],
+    begin: [u8; 4],
+    block: [u8],
+}
+
+impl PieceMessage {
+    pub fn index(&self) -> u32
+    {
+        u32::from_be_bytes(self.index)
+    }
+    pub fn begin(&self) -> u32
+    {
+        u32::from_be_bytes(self.begin)
+    }
+    pub fn block(&self) -> &[u8]
+    {
+        &self.block
+    }
+    pub fn from_bytes(bytes: &[u8]) -> &Self
+    {
+        let ptr = (&bytes[..]) as *const [u8] as *const Self;
+        unsafe { &*ptr }
+    }
+}
+
+#[derive(Debug)]
+pub struct PeerRequest
+{
+    index: [u8; 4],
+    begin: [u8; 4],
+    length: [u8; 4],
+}
+
+impl PeerRequest {
+    pub fn new(index: u32, begin: u32, length: u32) -> Self
+    {
+        Self
+        {
+            index: index.to_be_bytes(),
+            begin: begin.to_be_bytes(),
+            length: length.to_be_bytes(),
+        }
+    }
+    pub fn index(&self) -> u32
+    {
+        u32::from_be_bytes(self.index)
+    }
+    pub fn begin(&self) -> u32
+    {
+        u32::from_be_bytes(self.begin)
+    }
+    pub fn length(&self) -> u32
+    {
+        u32::from_be_bytes(self.length)
+    }
+    pub fn to_bytes(&self) -> &[u8]
+    {
+        unsafe {
+            from_raw_parts(
+                self as *const Self as *const u8,
+                std::mem::size_of::<Self>(),
+            )
+        }
+    }
+}
+
 
 #[derive(Debug)]
 pub struct Handshake
@@ -28,17 +101,14 @@ impl Handshake
             peer_id: *b"00112233445566778890",
         }
     }
-    pub fn to_bytes(&self) -> Vec<u8>
+    pub fn to_bytes_mut(&mut self) -> &mut [u8]
     {
-        let mut bytes = Vec::with_capacity(Self::SIZE);
-
-        bytes.push(self.length);
-        bytes.extend(&self.bit_torrent);
-        bytes.extend(&self.reserved);
-        bytes.extend(&self.info_hash);
-        bytes.extend(&self.peer_id);
-
-        bytes
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self as *mut Self as *mut u8,
+                std::mem::size_of::<Self>(),
+            )
+        }
     }
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self>
     {
@@ -59,7 +129,7 @@ impl Handshake
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[repr(u8)]
 pub enum MessageTag
 {
@@ -94,7 +164,7 @@ impl Decoder for MessageFramer {
         &mut self,
         src: &mut BytesMut,
     ) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 5 {
+        if src.len() < 4 {
             // Not enough data to read length marker.
             return Ok(None);
         }
@@ -103,6 +173,15 @@ impl Decoder for MessageFramer {
         let mut length_bytes = [0u8; 4];
         length_bytes.copy_from_slice(&src[..4]);
         let length = u32::from_be_bytes(length_bytes) as usize;
+
+        if length == 0
+        {
+            src.advance(4); // heartbeat messages
+            return self.decode(src);
+        }
+        if src.len() < 5 { // if not enough for tag + len
+            return Ok(None);
+        }
 
         // Check that the length is not too large to avoid a denial of
         // service attack where the server runs out of memory.
@@ -126,7 +205,7 @@ impl Decoder for MessageFramer {
             return Ok(None);
         }
 
-        if src[5] > 8
+        if src[4] > 8
 
         {
             return Err(std::io::Error::new(
@@ -134,9 +213,15 @@ impl Decoder for MessageFramer {
                 format!("Invalid message Tag. Expected a value in the range [0, 8], found: {}", src[5]),
             ));
         }
-        let message_tag: MessageTag = unsafe { std::mem::transmute(src[5]) };
-        let data = src[5..4 + length - 1].to_vec();
-        src.advance(4 + length);
+        let message_tag: MessageTag = unsafe { std::mem::transmute(src[4]) };
+
+        let data = if src.len() > 5 {
+            let vec = src[4..4 + length - 1].to_vec();
+            src.advance(4 + length);
+            vec
+        } else {
+            vec![]
+        };
 
         Ok(
             Some(
@@ -149,6 +234,7 @@ impl Decoder for MessageFramer {
         )
     }
 }
+
 impl Encoder<Message> for MessageFramer {
     type Error = std::io::Error;
 
@@ -158,7 +244,7 @@ impl Encoder<Message> for MessageFramer {
         if item.payload.len() + 1 > MAX {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Frame of length {} is too large.", item.payload.len() + 1)
+                format!("Frame of length {} is too large.", item.payload.len() + 1),
             ));
         }
 
@@ -177,8 +263,6 @@ impl Encoder<Message> for MessageFramer {
         Ok(())
     }
 }
-
-
 
 
 #[cfg(test)]
