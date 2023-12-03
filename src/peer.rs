@@ -1,9 +1,13 @@
-use std::arch::x86_64::_andn_u32;
+use std::net::SocketAddrV4;
 use std::slice::from_raw_parts;
-use anyhow::Context;
-use tokio_util::codec::Decoder;
+use anyhow::{ Context};
+use tokio_util::codec::{Decoder, Framed};
 use tokio_util::codec::Encoder;
 use bytes::{BytesMut, Buf};
+use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use crate::peer::MessageTag::{ Request};
 
 
 #[derive(Debug)]
@@ -74,6 +78,133 @@ impl PeerRequest {
         }
     }
 }
+pub(crate) struct Peer
+{
+    addr: SocketAddrV4,
+    stream: Framed<TcpStream, MessageFramer>,
+    bitfield: Bitfield
+}
+
+impl Peer {
+ const BLOCK_MAX: u32 = 2 << 14;
+    pub async fn new(socket: SocketAddrV4, hash_info: [u8;20]) -> anyhow::Result<Self>
+    {
+       let tcp_stream =  Peer::handshake(hash_info,&socket).await?;
+        let (framed,bitfield) = Peer::create_connection(tcp_stream).await?;
+      Ok(
+          Self
+        {
+            addr: socket,
+            stream: framed,
+            bitfield
+        }
+      )
+    }
+    async fn handshake(hash_info: [u8; 20], socket: &SocketAddrV4) -> anyhow::Result<TcpStream>
+    {
+        let mut handshake = Handshake::new(hash_info);
+        let mut peer = TcpStream::connect(socket).await.context("Creating connection to peer")?;
+        let handshake_bytes = handshake.to_bytes_mut();
+        peer.write_all(&handshake_bytes).await.context("Writing to peer")?;
+
+        let mut buffer = Vec::new();
+        peer.read_to_end(&mut buffer).await?;
+        let response_handshake = Handshake::from_bytes(&buffer).context("Getting back handshake")?;
+        println!("Handshake: {:?}", response_handshake);
+        Ok(peer)
+    }
+
+    async fn create_connection(tcp_stream: TcpStream) -> anyhow::Result<(Framed<TcpStream,MessageFramer>, Bitfield)>
+    {
+        let mut framed = Framed::new(tcp_stream, MessageFramer);
+        let msg = framed.next().await.expect("Peer always sends first message")
+            .context("Deriving message")?;
+        anyhow::ensure!(msg.tag == MessageTag::Bitfield, "Should has bitfield tag");
+        let bitfield = Bitfield::from_bytes(&msg.payload);
+        framed.send(
+            Message
+            {
+                tag: MessageTag::Interested,
+                payload: vec![],
+            }
+        ).await.context("Sending 'interesting' message")?;
+        let msg = framed.next().await.expect("Peer always sends first message")
+            .context("Deriving message")?;
+
+        anyhow::ensure!(msg.tag == MessageTag::UnChoke, "Should have message tag 'Unchoke'");
+        Ok((framed, bitfield))
+    }
+
+    pub async fn download(&mut self, piece_i: u32, block_i: u32, block_size: u32 ) -> anyhow::Result<Vec<u8>>
+    {
+         let request = PeerRequest::new(piece_i, (block_i * Self::BLOCK_MAX), block_size);
+            // TODO! add safe casting
+
+            self.stream.send(
+                Message
+                {
+                    tag: Request,
+                    payload: request.to_bytes().to_vec(),
+                }
+            ).await.
+                with_context(||
+                    format!("request with index: {}, len: {}, begin: {}",
+                            request.index(), request.length(), request.begin()
+                    )
+                )?;
+            let msg = self.stream.next().await.expect("Peer always sends first message")
+                .context("Deriving piece message")?;
+            anyhow::ensure!(msg.tag == MessageTag::Piece, " Should be a 'Piece' message.");
+            anyhow::ensure!(!msg.payload.is_empty(), "Piece is empty");
+
+
+        let pieces = PieceMessage::from_bytes(&msg.payload);
+        anyhow::ensure!(
+            pieces.index() == piece_i &&
+            pieces.begin() == block_i &&
+            pieces.block().len() == block_size as usize,
+            "Wrong return data");
+
+        Ok(Vec::from(&pieces.block))
+
+    }
+}
+
+pub(crate) struct Bitfield
+{
+    payload: Vec<u8>
+}
+impl Bitfield
+{
+    pub(crate) fn from_bytes(payload: &[u8]) -> Self
+    {
+        Self
+        {
+            payload: Vec::from(payload)
+        }
+    }
+    pub(crate) fn has_piece(&self, piece_i: u32) -> bool
+    {
+        let byte = piece_i / u8::BITS;
+        let bit = piece_i % u8::BITS;
+        let Some(byte) = self.payload.get(byte as usize) else {
+            return false
+        };
+        (byte & 1_u8.rotate_right(bit + 1)) != 0
+    }
+    pub(crate) fn pieces(&self) -> impl Iterator<Item = usize> + '_
+    {
+        self.payload.iter().enumerate().flat_map(|(byte_i, byte)|
+            {
+                (0..u8::BITS).filter_map(move |bit_i|
+                    {
+                        let piece_i = byte_i * u8::BITS as usize + bit_i as usize;
+                        let mask = 1_u8.rotate_right(bit_i + 1);
+                        let mask = mask >> 1;
+                      (byte & mask != 0).then(||piece_i)
+                    })
+            })
+    }}
 
 
 #[derive(Debug)]

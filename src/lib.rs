@@ -1,5 +1,7 @@
 pub mod tracker;
 pub mod peer;
+pub mod torrent;
+pub mod downloaded;
 
 pub mod cli
 {
@@ -44,6 +46,11 @@ pub mod cli
             torrent: PathBuf,
             piece: usize,
         },
+        Download
+        {
+            torrent: PathBuf,
+            output: PathBuf,
+        },
     }
 }
 
@@ -54,7 +61,6 @@ pub mod torrent_executor
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use crate::cli::Commands;
     use crate::peer::{Handshake, Message, MessageFramer, MessageTag, PeerRequest, PieceMessage};
-    use crate::{Keys, Torrent};
     use crate::tracker::{TrackerResponse, url_encode};
     use crate::tracker::TrackerRequest;
     use anyhow::Context;
@@ -62,8 +68,9 @@ pub mod torrent_executor
     use crate::decoder::decode_bencoded_value;
     use futures_util::stream::StreamExt;
     use futures_util::SinkExt;
-    use sha1::{Sha1,Digest};
-    use crate::peer::MessageTag::{ Request};
+    use sha1::{Sha1, Digest};
+    use crate::peer::MessageTag::{Request};
+    use crate::torrent::{Keys, Torrent};
 
     pub struct TorrentExecutor;
 
@@ -158,7 +165,7 @@ pub mod torrent_executor
                             } else {
                                 2 ^ 14
                             };
-                            let request = PeerRequest::new(piece as u32,(block * 2 ^ 14) as u32, block_size as u32);
+                            let request = PeerRequest::new(piece as u32, (block * 2 ^ 14) as u32, block_size as u32);
                             // TODO! add safe casting
 
                             framed.send(
@@ -185,6 +192,16 @@ pub mod torrent_executor
                         let hash = sha.finalize();
                         println!("{:?}", hash);
                     }
+                Commands::Download { torrent, output } => {
+                    // let torrent = Torrent::read(output)?;
+                    // torrent.print_tree();
+                    // let files = torrent.download_all().await?;
+                    // tokio::fs::write(
+                    //     &output, files.iter().next().expect("always one file").bytes(),
+                    // ).await?;
+                    // torrent.download_some(vec![("/foo.txt", output)]).await?;
+                    // torrent.download_single(output).await?;
+                }
                 _ => { unimplemented!() }
             }
             Ok(())
@@ -285,74 +302,7 @@ pub mod hashes
 }
 
 
-use std::path::PathBuf;
-use anyhow::Context;
-use serde::{Deserialize, Serialize};
-use sha1::{Sha1, Digest};
-use crate::hashes::Hashes;
 
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct Torrent
-{
-    pub announce: String,
-    pub info: Info,
-}
-
-impl Torrent
-{
-    pub fn info_hash(&self) -> anyhow::Result<[u8; 20]>
-    {
-        let re_encoded = serde_bencode::to_bytes(&self.info)?;
-
-        let mut hash = Sha1::new();
-        hash.update(re_encoded);
-        Ok(hash.finalize().into())
-    }
-}
-
-impl TryFrom<&PathBuf> for Torrent
-{
-    type Error = anyhow::Error;
-
-    fn try_from(value: &PathBuf) -> Result<Self, Self::Error> {
-        let f = std::fs::read(value).context("Read torrent file")?;
-        serde_bencode::from_bytes(&f).context("Parse torrent file")
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Info
-{
-    pub name: String,
-    pub length: usize,
-    #[serde(rename(deserialize = "piece length"))]
-    pub piece_length: usize,
-    pub pieces: Hashes,
-    #[serde(flatten)]
-    pub keys: Keys,
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum Keys
-{
-    SingleFile
-    {
-        length: usize
-    },
-    MultiFile
-    {
-        file: Vec<File>
-    },
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct File
-{
-    pub length: usize,
-    pub path: Vec<String>,
-}
 
 pub mod decoder {
     use serde_json::Value;

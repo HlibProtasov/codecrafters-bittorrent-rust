@@ -1,4 +1,6 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize, Serializer};
+use crate::torrent::Torrent;
 use crate::tracker::peers::Peers;
 
 /// FIELD INFO_HASH is not included
@@ -51,12 +53,35 @@ pub struct TrackerResponse
     pub peers: Peers,
 
 }
+impl TrackerResponse
+{
+   pub(crate) async fn query(torrent: &Torrent, peer_id: String) -> anyhow::Result<Self>
+    {
+        let length= torrent.len();
+            let tracker_request = TrackerRequest::new(peer_id, length);
+
+            let url_params = serde_urlencoded::to_string(tracker_request).
+                context("URL-tracker params")?;
+            let info_hash = torrent.info_hash()?;
+
+            let tracker_url = format!("{}?{}&info_hash={}",
+                                      torrent.announce,
+                                      url_params,
+                                      &url_encode(&info_hash));
+
+            let response = reqwest::get(tracker_url).await.context("Fetch Tracker")?;
+            let response: TrackerResponse = serde_json::from_slice(&response.bytes().await
+                .context("Fetch tracker response")?)
+                .context("Serialising response bytes")?;
+
+        Ok(response)
+    }
+}
 
 pub mod peers
 {
     use std::fmt;
     use std::net::{Ipv4Addr, SocketAddrV4};
-    use bytes::Buf;
     use serde::de::{Error, Visitor};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
