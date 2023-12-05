@@ -1,6 +1,9 @@
+use std::collections::BinaryHeap;
 use std::net::SocketAddrV4;
 use std::slice::Iter;
 use anyhow::Context;
+use futures_util::stream::StreamExt;
+use crate::peer::Peer;
 use crate::torrent::{File, Torrent};
 use crate::tracker::TrackerResponse;
 
@@ -14,6 +17,27 @@ pub(crate) async fn all(torrent: &Torrent, peer_id: String) -> anyhow::Result<Do
 {
           let tracker_response = TrackerResponse::query(torrent, peer_id).await
           .context("Query tracker for peer info")?;
+
+    let mut peer_list = Vec::new();
+
+    /// TODO: in parallel
+   let mut stream = futures_util::stream::iter(tracker_response.peers.0.iter()).map(
+       |peer|
+
+    Peer::new(*peer, torrent.info_hash()?)
+   ).buffer_unordered(5/*TODO user config**/);
+    while let Some(peer) = stream.next().await {
+        match peer {
+            Some(peer) => peer_list.push(peer),
+
+            Err(e) =>
+                eprintln!("Fail to connect ot peer: {:?} with error: {}", peer, e)
+        }
+
+    }
+    drop(stream);
+
+
 
           todo!()
       }

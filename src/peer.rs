@@ -78,6 +78,7 @@ impl PeerRequest {
         }
     }
 }
+#[derive(Debug)]
 pub(crate) struct Peer
 {
     addr: SocketAddrV4,
@@ -167,6 +168,10 @@ impl Peer {
 
         Ok(Vec::from(&pieces.block))
 
+    }
+    pub fn has_piece(&self,piece_i: u32) -> bool
+    {
+        self.bitfield.has_piece(piece_i)
     }
 }
 

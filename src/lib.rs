@@ -2,6 +2,7 @@ pub mod tracker;
 pub mod peer;
 pub mod torrent;
 pub mod downloaded;
+pub mod piece;
 
 pub mod cli
 {
