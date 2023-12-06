@@ -87,7 +87,7 @@ pub(crate) struct Peer
 }
 
 impl Peer {
- const BLOCK_MAX: u32 = 2 << 14;
+ pub const BLOCK_MAX: u32 = 2 << 14;
     pub async fn new(socket: SocketAddrV4, hash_info: [u8;20]) -> anyhow::Result<Self>
     {
        let tcp_stream =  Peer::handshake(hash_info,&socket).await?;
@@ -175,6 +175,7 @@ impl Peer {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Bitfield
 {
     payload: Vec<u8>
@@ -288,6 +289,7 @@ pub struct Message
 }
 
 
+#[derive(Debug)]
 pub struct MessageFramer;
 
 const MAX: usize = 2 ^ 16;

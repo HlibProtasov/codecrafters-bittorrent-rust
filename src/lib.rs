@@ -184,7 +184,7 @@ pub mod torrent_executor
                             let msg = framed.next().await.expect("Peer always sends first message")
                                 .context("Deriving piece message")?;
                             assert_eq!(msg.tag, MessageTag::Piece, "Waiting for the 'Piece message'");
-                            assert!(!msg.payload.is_empty(), "Shuldn't be empty");
+                            assert!(!msg.payload.is_empty(), "Shouldn't be empty");
                             let piece = PieceMessage::from_bytes(msg.payload.as_slice());
                             pieces.extend(piece.block());
                         }
@@ -278,7 +278,7 @@ pub mod hashes
                 )
             )
         }
-        fn visit_borrowed_bytes<E>(self, v: &'de [u8]) -> Result<Self::Value, E> where E: Error {
+        fn visit_borrowed_bytes<E>(self, _v: &'de [u8]) -> Result<Self::Value, E> where E: Error {
             todo!()
         }
     }
