@@ -3,8 +3,9 @@ use std::net::SocketAddrV4;
 use std::slice::Iter;
 use anyhow::Context;
 use futures_util::stream::StreamExt;
-use crate::peer::{Message, MessageTag, Peer, PeerRequest, PieceMessage};
-use crate::peer::MessageTag::Request;
+use sha1::{Sha1, Digest};
+use tokio::task::JoinSet;
+use crate::peer::{Peer, PieceMessage};
 use crate::piece::Piece;
 use crate::torrent::{File, Torrent};
 use crate::tracker::TrackerResponse;
@@ -21,19 +22,20 @@ pub(crate) async fn all(torrent: &Torrent, peer_id: String) -> anyhow::Result<Do
     let tracker_response = TrackerResponse::query(torrent, peer_id).await
         .context("Query tracker for peer info")?;
 
-    let peer_list = {
+    let mut peer_list = {
         let mut peer_list = Vec::new();
 
+        let info_hash = torrent.info_hash()?;
         let mut stream = futures_util::stream::iter(tracker_response.peers.0.iter()).map(
             |peer|
 
-                Peer::new(*peer, torrent.info_hash()?)
+                Peer::new(*peer, info_hash)
         ).buffer_unordered(5/*TODO user config**/);
         while let Some(peer) = stream.next().await {
             match peer {
                 Ok(peer) => peer_list.push(peer),
 
-                Err(e) =>
+                Err(ref e) =>
                     eprintln!("Fail to connect ot peer: {:?} with error: {}", peer, e)
             }
         }
@@ -55,41 +57,77 @@ pub(crate) async fn all(torrent: &Torrent, peer_id: String) -> anyhow::Result<Do
     /// TODO!
     assert!(no_piece.is_empty());
 
-
     while let Some(piece) = pieces.pop() {
-        let nblocks = (piece.length() + Peer::BLOCK_MAX as usize - 1) / Peer::BLOCK_MAX as usize;
-        let mut pieces: Vec<u8> = Vec::with_capacity(nblocks);
+        let nblocks = ((piece.length() + Peer::BLOCK_MAX as usize - 1) / Peer::BLOCK_MAX as usize) as u32;
+        let mut pieces: Vec<u8> = Vec::with_capacity(nblocks as usize);
+
+        let peers_with_piece: Vec<_> = peer_list
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, peer)| piece.peers().contains(&i).then_some(peer))
+            .collect();
+
+        let (submit, tasks  ) = kanal::bounded_async::<u32>(nblocks as usize);
         for block in 0..nblocks
         {
-            let md = piece.length() % Peer::BLOCK_MAX as usize;
-            let block_size = match block == nblocks {
-                true if md != 0 => md as u32,
-                _ => Peer::BLOCK_MAX
-            };
-            let request = PeerRequest::new(piece.index() as u32, (block as u32 * Peer::BLOCK_MAX), block_size);
-            // TODO! add safe casting
-
-            framed.send(
-                Message
-                {
-                    tag: Request,
-                    payload: request.to_bytes().to_vec(),
-                }
-            ).await.
-                with_context(||
-                    format!("request with index: {}, len: {}, begin: {}",
-                            request.index(), request.length(), request.begin()
-                    )
-                )?;
-            let msg = framed.next().await.expect("Peer always sends first message")
-                .context("Deriving piece message")?;
-            assert_eq!(msg.tag, MessageTag::Piece, "Waiting for the 'Piece message'");
-            assert!(!msg.payload.is_empty(), "Shouldn't be empty");
-            let piece = PieceMessage::from_bytes(msg.payload.as_slice());
-            pieces.extend(piece.block());
+            submit.send(block).await?;
         }
+        let (finish, mut done) = tokio::sync::mpsc::channel(nblocks as usize);
+        let mut participants =  futures_util::stream::futures_unordered::FuturesUnordered::new();
+        let piece_size = piece.length();
+        for peer in peers_with_piece
+        {
+            participants.push(peer.participate(
+                piece.index() as u32,
+                piece_size as u32,
+                nblocks as u32,
+                submit.clone(),
+                tasks.clone(),
+                finish.clone())
+            );
+        }
+
+        let mut bytes_recv = 0;
+        let mut all_blocks = vec![0u8; piece.length()];
+        loop {
+            tokio::select! {
+                joined = participants.next() =>
+                {
+                    match joined {
+                    None => { }, // the are no peers
+                    Some(Ok(_)) => {} // the peer gave up
+                    Some(Err(_)) => {} //The peer failed
+                }
+                    },
+                piece = done.recv() =>
+                {
+                    if let Some(piece) = &piece {
+                    let piece = PieceMessage::from_bytes(&piece.payload);
+                    bytes_recv += piece.block().len();
+                   all_blocks[piece.begin() as usize..].copy_from_slice(piece.block())
+                    }
+                else {
+
+                    anyhow::ensure!(piece_size == bytes_recv, "Not enough bytes");
+                    // have recieved every piece or no peers left
+                    break;
+                }
+                }
+            }
+        }
+
+        drop(done);
+        drop(finish);
+        drop(submit);
+
+        let mut sha = Sha1::new();
+        sha.update(all_blocks);
+        let hash:[u8;20] = sha.finalize().try_into().context("Trying to get hash from blocks")?;
+        anyhow::ensure!(hash == piece.hash(),"Got wrong hash from blocks");
+
+
     }
-        todo!()
+    todo!()
 }
 
 pub(crate) async fn download_piece(peers: &[SocketAddrV4], piece_hash: [u8; 20], piece_len: usize) -> anyhow::Result<Downloaded>

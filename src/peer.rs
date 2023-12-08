@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::net::SocketAddrV4;
 use std::slice::from_raw_parts;
 use anyhow::{ Context};
@@ -5,6 +6,7 @@ use tokio_util::codec::{Decoder, Framed};
 use tokio_util::codec::Encoder;
 use bytes::{BytesMut, Buf};
 use futures_util::{SinkExt, StreamExt};
+use kanal::{AsyncReceiver, AsyncSender};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use crate::peer::MessageTag::{ Request};
@@ -16,6 +18,7 @@ pub struct PieceMessage
     index: [u8; 4],
     begin: [u8; 4],
     block: [u8],
+
 }
 
 impl PieceMessage {
@@ -135,8 +138,53 @@ impl Peer {
         anyhow::ensure!(msg.tag == MessageTag::UnChoke, "Should have message tag 'Unchoke'");
         Ok((framed, bitfield))
     }
+    pub(crate) async fn participate(
+        &mut self,
+        piece_i: u32,
+        piece_size: u32,
+        nblocks: u32,
+        sender: AsyncSender<u32>,
+        reciever: AsyncReceiver<u32>,
+        finish: tokio::sync::mpsc::Sender<Message>
+    ) -> anyhow::Result<()>
+    {
+        while let Ok(block) = reciever.recv().await {
 
-    pub async fn download(&mut self, piece_i: u32, block_i: u32, block_size: u32 ) -> anyhow::Result<Vec<u8>>
+            let md = piece_size % Peer::BLOCK_MAX;
+            let block_size = match block == nblocks {
+                true if md != 0 => md,
+                _ => Peer::BLOCK_MAX
+            };
+
+            let request = PeerRequest::new(piece_i, block as u32 * Peer::BLOCK_MAX, block_size);
+
+            self.stream.send(
+                Message
+                {
+                    tag: Request,
+                    payload: request.to_bytes().to_vec(),
+                }
+            ).await.
+                with_context(||
+                    format!("request with index: {}, len: {}, begin: {}",
+                            request.index(), request.length(), request.begin()
+                    )
+                )?;
+            let msg = self.stream.next().await.expect("Peer always sends first message")
+                .context("Deriving piece message")?;
+
+            anyhow::ensure!(msg.tag == MessageTag::Piece, "Waiting for the 'Piece message'");
+            anyhow::ensure!(!msg.payload.is_empty(), "Shouldn't be empty");
+
+            finish.send(msg).await?;
+
+        }
+
+        Ok(())
+
+    }
+
+     async fn download(&mut self, piece_i: u32, block_i: u32, block_size: u32 ) -> anyhow::Result<Vec<u8>>
     {
          let request = PeerRequest::new(piece_i, (block_i * Self::BLOCK_MAX), block_size);
             // TODO! add safe casting

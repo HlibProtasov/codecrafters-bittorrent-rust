@@ -39,3 +39,4 @@ futures-sink = "0.3.29"
 futures-core = "0.3.29"
 futures-util = { features = ["sink"] , version = "0.3.29" }
 fastrand = "2.0.1"
+kanal = "0.1.0-pre8"

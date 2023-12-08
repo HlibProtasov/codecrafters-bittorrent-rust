@@ -47,6 +47,10 @@ impl Piece
     {
         self.piece_i
     }
+    pub fn hash(&self) -> [u8;20]
+    {
+        self.info_hash
+    }
 }
 
 impl Ord for Piece
